@@ -6,29 +6,34 @@ import (
 	"github.com/vmware/harbor/src/common/utils/log"
 
 	"fmt"
+	"sync"
 )
 
 //Watcher is an asynchronous runner to provide an evaluation environment for the policy.
 type Watcher struct {
+	//Locker to sync related operations.
+	*sync.RWMutex
+
 	//The target policy.
 	p policy.Policy
 
 	//The channel for receive stop signal.
 	cmdChan chan bool
 
-	//Indicate whether the watch is started and running.
+	//Indicate whether the watcher is started and running.
 	isRunning bool
 
 	//Report stats to scheduler.
 	stats chan *StatItem
 
 	//If policy is automatically completed, report the policy to scheduler.
-	doneChan chan string
+	doneChan chan *Watcher
 }
 
 //NewWatcher is used as a constructor.
-func NewWatcher(p policy.Policy, st chan *StatItem, done chan string) *Watcher {
+func NewWatcher(p policy.Policy, st chan *StatItem, done chan *Watcher) *Watcher {
 	return &Watcher{
+		RWMutex:   new(sync.RWMutex),
 		p:         p,
 		cmdChan:   make(chan bool),
 		isRunning: false,
@@ -39,7 +44,7 @@ func NewWatcher(p policy.Policy, st chan *StatItem, done chan string) *Watcher {
 
 //Start the running.
 func (wc *Watcher) Start() {
-	if wc.isRunning {
+	if wc.IsRunning() {
 		return
 	}
 
@@ -55,8 +60,8 @@ func (wc *Watcher) Start() {
 		}()
 
 		defer func() {
-			wc.isRunning = false
-			log.Infof("Work for policy %s is stopped.\n", wc.p.Name())
+			wc.setRunningState(false)
+			log.Infof("Worker for policy %s is stopped.\n", wc.p.Name())
 		}()
 
 		evalChan, err := pl.Evaluate()
@@ -106,7 +111,7 @@ func (wc *Watcher) Start() {
 					//Policy is automatically completed.
 					//Report policy change stats.
 					if wc.doneChan != nil {
-						wc.doneChan <- wc.p.Name()
+						wc.doneChan <- wc
 					}
 
 					return
@@ -118,12 +123,12 @@ func (wc *Watcher) Start() {
 		}
 	}(wc.p)
 
-	wc.isRunning = true
+	wc.setRunningState(true)
 }
 
 //Stop the running.
 func (wc *Watcher) Stop() {
-	if !wc.isRunning {
+	if !wc.IsRunning() {
 		return
 	}
 
@@ -137,5 +142,16 @@ func (wc *Watcher) Stop() {
 
 //IsRunning to indicate if the watcher is still running.
 func (wc *Watcher) IsRunning() bool {
+	wc.RLock()
+	defer wc.RUnlock()
+
 	return wc.isRunning
+}
+
+//Set the running status of the watcher.
+func (wc *Watcher) setRunningState(isRunning bool) {
+	wc.Lock()
+	defer wc.Unlock()
+
+	wc.isRunning = isRunning
 }
